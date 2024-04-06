@@ -1,7 +1,6 @@
-package main
+package redis
 
 import (
-	"flag"
 	"os"
 )
 
@@ -12,21 +11,15 @@ type Config struct {
 	MasterPort string
 }
 
-var (
-	port    = flag.String("port", "6379", "Port for TCP server to listen to")
-	replica = flag.String("replicaof", "*", "The address for Master instance")
-)
-
-func NewConfig() *Config {
-	flag.Parse()
+func NewConfig(port string, replica string) *Config {
 	var masterPort string
-	if *replica != "*" {
+	if replica != "*" {
 		masterPort = os.Args[len(os.Args)-1]
 	}
 	return &Config{
-		Port:       *port,
-		Role:       getRole(*replica),
-		MasterHost: *replica,
+		Port:       port,
+		Role:       getRole(replica),
+		MasterHost: replica,
 		MasterPort: masterPort,
 	}
 }

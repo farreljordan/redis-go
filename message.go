@@ -1,4 +1,4 @@
-package main
+package redis
 
 import (
 	"log"
@@ -20,7 +20,7 @@ func ParseMessage(bytes []byte) (*Message, error) {
 	msgLst := strings.Split(msgStr, "\r\n")
 	msgSize, err := strconv.Atoi(msgLst[0][1:])
 	if err != nil {
-		log.Printf("Error when parsing message length with error of %v\n", err)
+		log.Panic("Failed to parse the message length", err)
 		return nil, err
 	}
 	log.Printf("Message length: %v\n", msgSize)
