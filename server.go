@@ -25,8 +25,10 @@ type server struct {
 
 	masterConn *connection
 	slavesConn []*connection
-	offset     int64 //TODO: remove this and replace with offset in earch connection
-	mu         sync.RWMutex
+	// TODO: remove this and replace with offset in each connection
+	// TODO: or this offset is for slave only
+	offset int64
+	mu     sync.RWMutex
 }
 
 func NewServer(listener net.Listener, logger *slog.Logger, replicaOf string) *server {
@@ -114,30 +116,29 @@ func (s *server) handleConn(conn *connection, reader *Reader, writer *Writer) {
 	for {
 		value, err := reader.Read()
 		if err != nil {
-			s.logger.Info(
+			s.logger.Error(
 				"failed to parse message",
 				slog.String("id", s.id),
 				slog.String("host", conn.RemoteAddr().String()),
-				slog.String("err", err.Error()),
+				slog.Any("err", err),
 			)
 			break
 		}
 
-		if value.typ != "array" {
-			s.logger.Info(
-				"invalid request, expected array",
+		err = func(value Value) error {
+			if value.typ != "array" {
+				return fmt.Errorf("message type should be array")
+			}
+			if len(value.array) == 0 {
+				return fmt.Errorf("array should not be empty")
+			}
+			return nil
+		}(value)
+		if err != nil {
+			s.logger.Error(
+				"failed to process request",
 				slog.Any("command", value),
-				slog.String("id", s.id),
-				slog.String("host", conn.RemoteAddr().String()),
-			)
-			break
-		}
-
-		if len(value.array) == 0 {
-			s.logger.Info(
-				"invalid request, expected array length > 0",
-				slog.String("id", s.id),
-				slog.String("host", conn.RemoteAddr().String()),
+				slog.Any("err", err),
 			)
 			break
 		}
@@ -180,7 +181,7 @@ func (s *server) handleConn(conn *connection, reader *Reader, writer *Writer) {
 			s.logger.Error(
 				"error handling command",
 				slog.Any("command", value),
-				slog.String("err", err.Error()),
+				slog.Any("err", err),
 			)
 			break
 		}
@@ -223,7 +224,7 @@ func (s *server) handleSet(args []Value, writer Writer) error {
 	key := args[0].bulk
 	value := args[1].bulk
 	var px string
-	s.logger.Info("set command received", slog.String("key", key), slog.String("value", value), slog.String("role", s.role))
+	s.logger.Debug("set command received", slog.String("key", key), slog.String("value", value), slog.String("role", s.role))
 
 	if len(args) >= 4 && strings.ToUpper(args[2].bulk) == "PX" {
 		px = args[3].bulk
@@ -255,20 +256,20 @@ func (s *server) handleInfo(args []Value, writer Writer) error {
 	_ = args[0].bulk
 	return writer.Write(Value{
 		typ:  "bulk",
-		bulk: fmt.Sprintf("role:%s\r\nmaster_replid:%s\r\nmaster_repl_offset:%d", s.role, s.id, s.offset),
+		bulk: fmt.Sprintf("role:%s\r\nmaster_replid:%s\r\nmaster_repl_offset:%d", s.role, s.id, s.offset), // TODO: Return the specified conn offset
 	})
 }
 
 func (s *server) handleReplconf(args []Value, writer Writer, conn connection) error {
 	arg1 := args[0].bulk
-	s.logger.Info("replconf command received", slog.String("arg1", arg1), slog.String("role", s.role))
+	s.logger.Debug("replconf command received", slog.String("arg1", arg1), slog.String("role", s.role))
 	switch strings.ToUpper(arg1) {
 	case "LISTENING-PORT":
 		return writer.Write(Value{typ: "string", str: "OK"})
 	case "CAPA":
 		return writer.Write(Value{typ: "string", str: "OK"})
 	case "GETACK":
-		s.logger.Info("getack command received", slog.String("role", s.role))
+		s.logger.Debug("getack command received", slog.String("role", s.role))
 		return writer.Write(Value{
 			typ: "array",
 			array: []Value{
@@ -278,13 +279,13 @@ func (s *server) handleReplconf(args []Value, writer Writer, conn connection) er
 			},
 		})
 	case "ACK":
-		s.logger.Info("ack command received", slog.Any("args", args), slog.String("role", s.role))
+		s.logger.Debug("ack command received", slog.Any("args", args), slog.String("role", s.role))
 		offset, err := strconv.Atoi(args[1].bulk)
 		if err != nil {
-			return fmt.Errorf("invalid offset value: %s", args[2].bulk)
+			return fmt.Errorf("failed to process %s as offset: %s", args[1].bulk, err)
 		}
 		conn.offSetAck <- int64(offset)
-		s.logger.Info(
+		s.logger.Debug(
 			"offset sent to conn.offSetAck",
 			slog.Int64("offset", int64(offset)),
 			slog.Any("conn", conn),
@@ -301,7 +302,7 @@ func (s *server) handleReplconf(args []Value, writer Writer, conn connection) er
 // TODO: Handle actual implementation
 func (s *server) handlePsync(args []Value, writer Writer, conn connection) error {
 	_ = args[0].bulk
-	if err := writer.Write(Value{typ: "string", str: fmt.Sprintf("FULLRESYNC %s %d", s.id, s.offset)}); err != nil {
+	if err := writer.Write(Value{typ: "string", str: fmt.Sprintf("FULLRESYNC %s %d", s.id, s.offset)}); err != nil { // TODO: Return the specified conn offset
 		return err
 	}
 	RDBContent, err := hex.DecodeString("524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2")
@@ -320,11 +321,11 @@ func (s *server) handlePsync(args []Value, writer Writer, conn connection) error
 func (s *server) handleWait(args []Value, writer Writer, conn connection) error {
 	numReplicas, err := strconv.Atoi(args[0].bulk)
 	if err != nil {
-		return fmt.Errorf("invalid numReplicas: %s", args[0].bulk)
+		return fmt.Errorf("failed to process %s as numReplicas: %s", args[0].bulk, err)
 	}
 	timeout, err := strconv.Atoi(args[1].bulk)
 	if err != nil {
-		return fmt.Errorf("invalid timeout: %s", args[1].bulk)
+		return fmt.Errorf("failed to process %s as timeout: %s", args[1].bulk, err)
 	}
 
 	// TODO: might need to remove, this is for TU8 test case
@@ -350,7 +351,6 @@ func (s *server) handleWait(args []Value, writer Writer, conn connection) error 
 
 	for _, conn := range s.slavesConn {
 		wg.Add(1)
-		// s.logger.Info("", slog.Any("conn", conn))
 		go func(conn *connection, val Value) {
 			defer wg.Done()
 			writer := NewWriter(conn)
@@ -361,32 +361,31 @@ func (s *server) handleWait(args []Value, writer Writer, conn connection) error 
 					s.logger.Error(
 						"failed to send REPLCONF GETACK to slave",
 						slog.String("slave", conn.RemoteAddr().String()),
-						slog.String("err", err.Error()),
+						slog.Any("err", err),
 					)
 					return
 				}
 
-				// s.logger.Info(
+				// s.logger.Debug(
 				// 	"waiting for ack from slave",
 				// 	slog.Any("conn", conn),
 				// 	slog.Any("conn.offSetAck", conn.offSetAck),
 				// )
 				select {
 				case offsetAck := <-conn.offSetAck:
-					s.logger.Info(
+					s.logger.Debug(
 						"ack received from slave",
 						slog.Int64("offset", offsetAck),
 						slog.Int64("expected", s.offset),
 					)
+					// TODO: check specified conn offset
 					if s.offset == offsetAck {
 						ackChan <- 1
 						return
 					}
-					// ackChan <- 1
-					// return
 				case <-ctx.Done():
 					// Stop waiting if the context is canceled (timeout or enough replicas acknowledged)
-					s.logger.Info(
+					s.logger.Debug(
 						"timeout or enough replicas acknowledged",
 					)
 					return
@@ -408,10 +407,11 @@ func (s *server) handleWait(args []Value, writer Writer, conn connection) error 
 	for {
 		select {
 		case <-ctx.Done():
-			// Timeout reached
+			// TODO: Need to update this based on how many time master sent the command to replicas
+			// Since master can send the command multiple times if the offsetAck is not equal to the offset
 			s.mu.RLock()
 			s.offset += int64(val.size)
-			s.logger.Info(
+			s.logger.Debug(
 				"offset updated",
 				slog.Int("size", val.size),
 			)
@@ -420,10 +420,11 @@ func (s *server) handleWait(args []Value, writer Writer, conn connection) error 
 		case ack := <-ackChan:
 			ackReplicas += ack
 			if ackReplicas >= numReplicas {
-				// Required number of replicas acknowledged
+				// TODO: Need to update this based on how many time master sent the command to replicas
+				// Since master can send the command multiple times if the offsetAck is not equal to the offset
 				s.mu.RLock()
 				s.offset += int64(val.size)
-				s.logger.Info(
+				s.logger.Debug(
 					"offset updated",
 					slog.Int("size", val.size),
 				)
@@ -493,13 +494,13 @@ func (s *server) connectToMaster() error {
 	if err != nil {
 		return err
 	}
-	s.logger.Info("received replId", slog.String("res", res.str))
+	s.logger.Debug("received replId", slog.String("res", res.str))
 
 	db, err := reader.ReadBulkWithoutCRLF()
 	if err != nil {
 		return err
 	}
-	s.logger.Info("received db", slog.String("db", db.bulk))
+	s.logger.Debug("received db", slog.String("db", db.bulk))
 
 	s.masterConn = NewConnection(conn)
 	go s.handleConnMaster(s.masterConn, reader, writer)
@@ -510,12 +511,12 @@ func (s *server) connectToMaster() error {
 func (s *server) propagateMessage(value Value) {
 	for _, conn := range s.slavesConn {
 		writer := NewWriter(conn)
-		s.logger.Info("writing to slave", slog.String("slave", conn.RemoteAddr().String()))
+		s.logger.Debug("writing to slave", slog.String("slave", conn.RemoteAddr().String()))
 		err := writer.Write(value)
 		if err != nil {
 			s.logger.Error(
 				"failed to propagate message",
-				slog.String("err", err.Error()),
+				slog.Any("err", err),
 			)
 		}
 	}

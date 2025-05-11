@@ -23,7 +23,7 @@ func main() {
 		logger.Error(
 			"cannot start tcp server",
 			slog.String("address", address),
-			slog.String("err", err.Error()),
+			slog.Any("err", err),
 		)
 		os.Exit(-1)
 	}
@@ -31,7 +31,7 @@ func main() {
 	server := NewServer(listener, logger, *replicaOf)
 	go func() {
 		if err := server.Start(); err != nil {
-			logger.Error("server error", slog.String("err", err.Error()))
+			logger.Error("server error", slog.Any("err", err))
 			os.Exit(1)
 		}
 	}()
@@ -41,7 +41,7 @@ func main() {
 	<-c
 
 	if err := server.Stop(); err != nil {
-		logger.Error("cannot stop server", slog.String("err", err.Error()))
+		logger.Error("cannot stop server", slog.Any("err", err))
 		os.Exit(1)
 	}
 }
