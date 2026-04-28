@@ -8,8 +8,8 @@ type connection struct {
 	prevCommand string // TODO: might need to remove, this is for TU8 test case
 }
 
-// TODO: save offset for earch connection
-
+// TODO: save offset for each connection
+// wrong, slave offset will be the same as masterReplOffset
 func NewConnection(conn net.Conn) *connection {
 	return &connection{
 		Conn:      conn,

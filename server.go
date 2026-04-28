@@ -13,11 +13,13 @@ import (
 	"time"
 )
 
+// TODO: fix wrong RWLock
 type server struct {
 	listener net.Listener
 	logger   *slog.Logger
+	config   *config
 
-	database Database
+	database *Database
 
 	role      string
 	masterUrl string
@@ -27,22 +29,24 @@ type server struct {
 	slavesConn []*connection
 	// TODO: remove this and replace with offset in each connection
 	// TODO: or this offset is for slave only
-	offset int64
-	mu     sync.RWMutex
+	masterReplOffset int64
+	offset           int64
+	mu               sync.RWMutex
 }
 
-func NewServer(listener net.Listener, logger *slog.Logger, replicaOf string) *server {
-	role := "master"
-	var masterUrl string
-	if replicaOf != "" {
-		role = "slave"
-		masterUrl = strings.Replace(replicaOf, " ", ":", 1)
-	}
+func NewServer(listener net.Listener, logger *slog.Logger, config *config) *server {
+	role, masterUrl := func(replicaOf string) (string, string) {
+		if replicaOf == "" {
+			return "master", ""
+		}
+		return "slave", strings.Replace(replicaOf, " ", ":", 1)
+	}(config.replicaOf)
 
 	return &server{
 		listener:  listener,
 		logger:    logger,
-		database:  *NewDatabase(),
+		config:    config,
+		database:  NewDatabase(),
 		role:      role,
 		masterUrl: masterUrl,
 		id:        generateId(),
@@ -59,7 +63,6 @@ func generateId() string {
 	return hex.EncodeToString(bytes)
 }
 
-// TODO: Review fmt.ErrorF and s.logger.Error
 func (s *server) Start() error {
 	if s.role == "slave" {
 		s.logger.Info("connecting to master")
@@ -107,7 +110,7 @@ func (s *server) Stop() error {
 
 func (s *server) handleConn(conn *connection, reader *Reader, writer *Writer) {
 	defer conn.Close()
-	s.logger.Info(
+	s.logger.Debug(
 		"client connected",
 		slog.String("id", s.id),
 		slog.String("host", conn.RemoteAddr().String()),
@@ -150,7 +153,7 @@ func (s *server) handleConn(conn *connection, reader *Reader, writer *Writer) {
 		case "PING":
 			err = s.handlePing(*writer)
 		case "ECHO":
-			err = writer.Write(Value{typ: "string", str: args[0].bulk})
+			err = writer.Write(Value{typ: "bulk", bulk: args[0].bulk})
 		case "GET":
 			err = s.handleGet(args, *writer)
 		case "SET":
@@ -167,6 +170,10 @@ func (s *server) handleConn(conn *connection, reader *Reader, writer *Writer) {
 			err = s.handlePsync(args, *writer, *conn)
 		case "WAIT":
 			err = s.handleWait(args, *writer, *conn)
+		case "CONFIG":
+			err = s.handleConfig(args, *writer)
+		default:
+			// err = s.handleUnkown(args, *writer)
 		}
 
 		// Replicas should update their offset to account for all commands propagated from the master, including PING and REPLCONF itself.
@@ -201,6 +208,10 @@ func (s *server) handleConnMaster(conn *connection, reader *Reader, writer *Writ
 	s.handleConn(conn, reader, writer)
 }
 
+func (s *server) handleUnknown(args []Value, writer Writer) error {
+	return writer.Write(Value{typ: "error", str: "ERR unknown command"})
+}
+
 func (s *server) handlePing(writer Writer) error {
 	if s.role == "slave" {
 		return nil
@@ -211,7 +222,7 @@ func (s *server) handlePing(writer Writer) error {
 
 func (s *server) handleGet(args []Value, writer Writer) error {
 	key := args[0].bulk
-	s.logger.Info("get command received", slog.String("key", key), slog.String("role", s.role))
+	s.logger.Debug("get command received", slog.String("key", key), slog.String("role", s.role))
 
 	if entry, ok := s.database.Load(key); ok {
 		return writer.Write(Value{typ: "bulk", bulk: entry.value})
@@ -355,6 +366,7 @@ func (s *server) handleWait(args []Value, writer Writer, conn connection) error 
 			defer wg.Done()
 			writer := NewWriter(conn)
 
+			// TODO: remove for loop, slaves will send ACK every sec instead
 			for {
 				err := writer.Write(val)
 				if err != nil {
@@ -432,6 +444,33 @@ func (s *server) handleWait(args []Value, writer Writer, conn connection) error 
 				return writer.Write(Value{typ: "integer", num: int64(ackReplicas)})
 			}
 		}
+	}
+}
+
+func (s *server) handleConfig(args []Value, writer Writer) error {
+	s.logger.Debug("config command received", slog.Any("args", args))
+	arg1 := args[0].bulk
+	switch strings.ToUpper(arg1) {
+	case "GET":
+		s.logger.Debug("config get command received", slog.Any("args", args))
+		parameters := args[1:]
+		array := []Value{}
+		for _, param := range parameters {
+			key := param.bulk
+			if value, ok := s.config.Get(key); ok {
+				array = append(array,
+					Value{typ: "bulk", bulk: key},
+					Value{typ: "bulk", bulk: value},
+				)
+			} else {
+				writer.Write(Value{typ: "null"})
+				return fmt.Errorf("invalid config parameter %s", arg1)
+			}
+		}
+		return writer.Write(Value{typ: "array", array: array})
+	default:
+		writer.Write(Value{typ: "null"})
+		return fmt.Errorf("invalid config command %s", arg1)
 	}
 }
 

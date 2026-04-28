@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"log/slog"
 	"net"
 	"os"
@@ -9,13 +8,10 @@ import (
 )
 
 func main() {
-	port := flag.String("port", "6379", "Port for TCP server to listen to")
-	replicaOf := flag.String("replicaof", "", "The address for Master instance")
-	flag.Parse()
-
+	config := ParseConfig()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	address := "0.0.0.0:" + *port
+	address := "0.0.0.0:" + config.port
 	logger.Info("starting server", slog.String("address", address))
 
 	listener, err := net.Listen("tcp", address)
@@ -28,7 +24,7 @@ func main() {
 		os.Exit(-1)
 	}
 
-	server := NewServer(listener, logger, *replicaOf)
+	server := NewServer(listener, logger, config)
 	go func() {
 		if err := server.Start(); err != nil {
 			logger.Error("server error", slog.Any("err", err))
